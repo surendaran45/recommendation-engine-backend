@@ -1,0 +1,10 @@
+venv/
+models/
+data/
+
+*.pkl
+*.bin
+*.joblib
+__pycache__/
+*.pyc
+.env
