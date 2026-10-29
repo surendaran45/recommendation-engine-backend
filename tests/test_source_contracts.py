@@ -45,7 +45,7 @@ def test_tmdb_key_is_not_hardcoded_and_uses_environment():
         and isinstance(node.value.func, ast.Attribute)
         and isinstance(node.value.func.value, ast.Name)
         and node.value.func.value.id == "os"
-        and node.value.func.attr == "get"
+        and node.value.func.attr in {"get", "getenv"}
         for node in assignments
     )
 
