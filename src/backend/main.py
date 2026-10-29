@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+import logging
 import pandas as pd
 import numpy as np
 import pickle
@@ -8,12 +9,14 @@ import os
 import requests
 
 app = FastAPI(title="Recommendation Engine API")
+logger = logging.getLogger(__name__)
 
+cors_origins = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "*").split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=cors_origins,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 # Load all models and data
@@ -47,17 +50,17 @@ print("✓ All models loaded")
 # ========================
 
 class RatingRequest(BaseModel):
-    user_id: int
-    item_id: int
-    rating: float
+    user_id: int = Field(ge=1)
+    item_id: int = Field(ge=1)
+    rating: float = Field(ge=0.5, le=5.0)
 
 class RecommendationRequest(BaseModel):
-    user_id: int
-    top_n: int = 10
+    user_id: int = Field(ge=1)
+    top_n: int = Field(default=10, ge=1, le=50)
 
 class GenreFilterRequest(BaseModel):
-    genre: str
-    top_n: int = 10
+    genre: str = Field(min_length=1, max_length=80)
+    top_n: int = Field(default=10, ge=1, le=50)
 
 # ========================
 # MOVIE ENDPOINTS
@@ -135,7 +138,7 @@ def recommend_movies(req: RecommendationRequest):
 @app.get("/movies/genre/{genre}")
 def movies_by_genre(genre: str, limit: int = 20):
     """Get movies by genre"""
-    filtered = movies_df[movies_df['genres'].str.contains(genre, case=False, na=False)]
+    filtered = movies_df[movies_df['genres'].str.contains(genre, case=False, na=False, regex=False)]
     if filtered.empty:
         return {"genre": genre, "count": 0, "movies": []}
     movies_list = filtered[['movieId', 'title', 'genres']].head(limit).to_dict(orient='records')
@@ -221,7 +224,7 @@ def recommend_anime(req: RecommendationRequest):
 @app.get("/anime/genre/{genre}")
 def anime_by_genre(genre: str, limit: int = 20):
     """Get anime by genre"""
-    filtered = anime_df[anime_df['genre'].str.contains(genre, case=False, na=False)]
+    filtered = anime_df[anime_df['genre'].str.contains(genre, case=False, na=False, regex=False)]
     if filtered.empty:
         return {"genre": genre, "count": 0, "anime": []}
     anime_list = filtered[['anime_id', 'name', 'genre']].head(limit).to_dict(orient='records')
@@ -242,15 +245,6 @@ def rate_item(req: RatingRequest):
         "item_id": req.item_id,
         "rating": req.rating
     }
-
-@app.get("/movies/search")
-def search_movies(q: str):
-    """Search movies by title"""
-    filtered = movies_df[movies_df['title'].str.contains(q, case=False, na=False)]
-    results = filtered[['movieId', 'title', 'genres']].head(20).to_dict(orient='records')
-    for m in results:
-        m['movieId'] = int(m['movieId'])
-    return {"query": q, "count": len(results), "results": results}
 
 @app.get("/anime/search")
 def search_anime(q: str):
@@ -306,25 +300,31 @@ def user_ratings(user_id: str):
     except:
         return {"ratings": []}
 
-TMDB_API_KEY = "adebe489963f054d04023e4f8ec84924"  
+# Keep provider credentials in server-side environment settings.
+TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 TMDB_BASE = "https://api.themoviedb.org/3"
 
 @app.get("/movie/{movie_id}/details")
 def get_movie_details(movie_id: int):
     """Get movie details with poster from TMDB"""
     try:
-        # Get from our database first
-        movie = movies_df[movies_df['movieId'] == movie_id].iloc[0]
-        
-        # Try to get poster from TMDB
-        tmdb_url = f"{TMDB_BASE}/search/movie?api_key={TMDB_API_KEY}&query={movie['title']}"
-        response = requests.get(tmdb_url, timeout=5)
-        
+        matching_movies = movies_df[movies_df["movieId"] == movie_id]
+        if matching_movies.empty:
+            raise HTTPException(status_code=404, detail="Movie not found")
+        movie = matching_movies.iloc[0]
+
+        # Poster lookup is optional; the endpoint works without a TMDB key.
         poster_path = None
-        if response.status_code == 200:
-            results = response.json().get('results', [])
-            if results:
-                poster_path = results[0].get('poster_path')
+        if TMDB_API_KEY:
+            response = requests.get(
+                f"{TMDB_BASE}/search/movie",
+                params={"api_key": TMDB_API_KEY, "query": str(movie["title"])},
+                timeout=5,
+            )
+            if response.status_code == 200:
+                results = response.json().get("results", [])
+                if results:
+                    poster_path = results[0].get("poster_path")
         
         return {
             'movieId': int(movie_id),
@@ -333,21 +333,26 @@ def get_movie_details(movie_id: int):
             'poster': f"https://image.tmdb.org/t/p/w342{poster_path}" if poster_path else None,
             'year': '2020'  # Add year if available
         }
-    except Exception as e:
-        return {'error': str(e), 'movieId': movie_id}
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("TMDB movie details lookup failed")
+        raise HTTPException(status_code=502, detail="Movie details are temporarily unavailable.") from None
 
 @app.get("/movies/search")
 def search_movies(q: str, sort: str = "title", order: str = "asc"):
-    """Search and sort movies"""
-    filtered = movies_df[movies_df['title'].str.contains(q, case=False, na=False)]
-    
-    # Sort
-    if sort == "title":
-        filtered = filtered.sort_values('title', ascending=(order == "asc"))
-    
-    results = filtered[['movieId', 'title', 'genres']].head(20).to_dict(orient='records')
-    for m in results:
-        m['movieId'] = int(m['movieId'])
+    """Search and sort movies."""
+    if not q.strip() or len(q) > 100:
+        raise HTTPException(status_code=422, detail="q must contain 1 to 100 characters")
+    if sort != "title":
+        raise HTTPException(status_code=422, detail="sort must be 'title'")
+    if order not in {"asc", "desc"}:
+        raise HTTPException(status_code=422, detail="order must be 'asc' or 'desc'")
+    filtered = movies_df[movies_df["title"].str.contains(q, case=False, na=False, regex=False)]
+    filtered = filtered.sort_values("title", ascending=(order == "asc"))
+    results = filtered[["movieId", "title", "genres"]].head(20).to_dict(orient="records")
+    for movie in results:
+        movie["movieId"] = int(movie["movieId"])
     return {"query": q, "count": len(results), "results": results}
 
 @app.get("/movies/filter")
