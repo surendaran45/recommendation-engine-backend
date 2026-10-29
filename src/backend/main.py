@@ -132,8 +132,12 @@ def recommend_movies(req: RecommendationRequest):
                 })
         
         return {"user_id": req.user_id, "recommendations": recommendations}
-    except Exception as e:
-        return {"error": str(e), "recommendations": []}
+    except Exception:
+        logger.exception("Movie recommendation failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not generate movie recommendations.",
+        ) from None
 
 @app.get("/movies/genre/{genre}")
 def movies_by_genre(genre: str, limit: int = 20):
@@ -218,8 +222,12 @@ def recommend_anime(req: RecommendationRequest):
                 })
         
         return {"user_id": req.user_id, "recommendations": recommendations}
-    except Exception as e:
-        return {"error": str(e), "recommendations": []}
+    except Exception:
+        logger.exception("Anime recommendation failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not generate anime recommendations.",
+        ) from None
 
 @app.get("/anime/genre/{genre}")
 def anime_by_genre(genre: str, limit: int = 20):
